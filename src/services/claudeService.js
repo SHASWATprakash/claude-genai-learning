@@ -1,18 +1,36 @@
-import fetch from "node-fetch";
-import { getUserMemory, addMessageToMemory } from "../utils/memoryStore.js";
+import { Chat } from "../models/chatModel.js";
 
 export const getClaudeResponse = async (userId, userMessage) => {
   try {
-    const previousMessages = getUserMemory(userId);
+    let chat = await Chat.findOne({ userId });
 
-    const messages = [
-      ...previousMessages,
-      {
-        role: "user",
-        content: userMessage,
-      },
-    ];
+    if (!chat) {
+      chat = new Chat({ userId, messages: [] });
+    }
 
+    // ✅ Convert old messages to Claude format
+    const formattedMessages = chat.messages.map((msg) => ({
+      role: msg.role,
+      content: [
+        {
+          type: "text",
+          text: msg.content,
+        },
+      ],
+    }));
+
+    // ✅ Add new user message
+    formattedMessages.push({
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: userMessage,
+        },
+      ],
+    });
+
+    // 🤖 Call Claude
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
@@ -23,28 +41,35 @@ export const getClaudeResponse = async (userId, userMessage) => {
       body: JSON.stringify({
         model: "claude-sonnet-4-6",
         max_tokens: 300,
-        messages,
+        messages: formattedMessages,
       }),
     });
 
     const data = await response.json();
 
-    const textBlock = data.content?.find(
+    // 🔥 DEBUG FULL RESPONSE
+    console.log("RAW FULL:", JSON.stringify(data, null, 2));
+
+    // ✅ Extract text safely
+    const textBlock = data?.content?.find(
       (item) => item.type === "text"
     );
 
+    if (!textBlock) {
+      console.error("❌ No text block found:", data);
+    }
+
     const reply = textBlock?.text || "No response";
 
-    // ✅ Save conversation
-    addMessageToMemory(userId, {
-      role: "user",
-      content: userMessage,
-    });
+    // 💾 Save messages (simple format for DB)
+    chat.messages.push({ role: "user", content: userMessage });
+    chat.messages.push({ role: "assistant", content: reply });
 
-    addMessageToMemory(userId, {
-      role: "assistant",
-      content: reply,
-    });
+    if (chat.messages.length > 20) {
+      chat.messages = chat.messages.slice(-20);
+    }
+
+    await chat.save();
 
     return reply;
   } catch (error) {
